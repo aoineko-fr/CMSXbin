@@ -28,6 +28,5 @@ Options:
   -ascii        Display ASCII code of each line (only for 8-bits data)
   -ad           Display decimal address offset of the first element of each line
   -ax           Display hexadecimal address offset of the first element of each line
-  -h            Display this help\n");
-
+  -h            Display the help
 ````
