@@ -7,7 +7,7 @@ _____________________________________________________________________________
                                                                              
 CMSXbin - Convert binary to text file
 
-Usage: bin2h <inputfile> [options]
+Usage: CMSXbin <inputfile> [options]
 
 Options:
   -o output     Filename of the output file (default: use input filename with .h/.asm extension)
