@@ -7,7 +7,7 @@ _____________________________________________________________________________
                                                                              
 CMSXbin - Convert binary to text file
 
-Usage: CMSXbin <inputfile> [options]
+Usage: bin2h <inputfile> [options]
 
 Options:
   -o output     Filename of the output file (default: use input filename with .h/.asm extension)
@@ -25,8 +25,11 @@ Options:
   -skip F S     Skip binary data from 'F' address to a 'S' size
                 Value can be hexadecimal (format: 0xFFFF) or decimal
                 Can be invoked multiple times to skip several sections
-  -ascii        Display ASCII code of each line (only for 8-bits data)
+  -ascii        Display ASCII code of each line (only for 8-bits data. default: false)
   -ad           Display decimal address offset of the first element of each line
   -ax           Display hexadecimal address offset of the first element of each line
-  -h            Display the help
+  -pt3			Extract PT3 header information and add it as comment (default: false)
+  -at X         Data starting address (can be decimal or hexadecimal starting with '0x')
+  -def			Add define before data structure (only for C language. default: false)
+  -h            Display this help
 ````
