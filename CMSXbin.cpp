@@ -14,11 +14,17 @@
 #include <ctime>
 #include <algorithm>
 #include <vector>
+#include <iostream>
+#include <fstream>
+#include <cstdarg>
+
+// CMSXtk
+#include "CMSXtk.h"
 
 //-----------------------------------------------------------------------------
 // DEFINES
 
-const char* VERSION = "1.1.0";
+const char* VERSION = "1.2.0";
 
 #define BUFFER_SIZE 1024
 
@@ -100,13 +106,53 @@ std::string				g_TableName;
 DATA_SIZE				g_Size = DATA_SIZE_8B;
 DATA_FORMAT				g_Format = DATA_FORMAT_HEXA;
 DATA_LANGUAGE			g_Lang = DATA_LANG_C;
+bool					g_AddStartAddr = false;
+u32						g_StartAddr = 0;
 i32						g_ValuePerLine = 16; // 0: not limit (only 1 line)
 std::vector<SkipData>	g_Skip;
-bool					g_ASCII = false;
+bool					g_ASCII = false; // Display ASCII code of each line (only for 8-bits data)
+bool					g_PT3 = false;
+bool					g_Define = false;
 ADDR_OFFSET				g_Address = ADDR_NONE;
 
 //-----------------------------------------------------------------------------
 
+inline std::string StringFormat(const char* fmt, ...)
+{
+	char buf[BUFFER_SIZE];
+
+	va_list args;
+	va_start(args, fmt);
+	const auto r = std::vsnprintf(buf, sizeof buf, fmt, args);
+	va_end(args);
+
+	if (r < 0)
+		// conversion failed
+		return {};
+
+	const size_t len = r;
+	if (len < sizeof buf)
+		// we fit in the buffer
+		return { buf, len };
+
+#if __cplusplus >= 201703L
+	// C++17: Create a string and write to its underlying array
+	std::string s(len, '\0');
+	va_start(args, fmt);
+	std::vsnprintf(s.data(), len + 1, fmt, args);
+	va_end(args);
+
+	return s;
+#else
+	// C++11 or C++14: We need to allocate scratch memory
+	auto vbuf = std::unique_ptr<char[]>(new char[len + 1]);
+	va_start(args, fmt);
+	std::vsnprintf(vbuf.get(), len + 1, fmt, args);
+	va_end(args);
+
+	return { vbuf.get(), len };
+#endif
+}
 
 // Remove the filename extension (if any)
 std::string RemoveExt(const std::string& str)
@@ -203,15 +249,34 @@ void StartTable(std::string& data, const std::string& name)
 	{
 	default:
 	case DATA_LANG_C:
-		switch (g_Lang)
+		if (g_Define)
+		{
+			data += StringFormat("\n"
+				"#ifndef D_%s\n"
+				"\t#define D_%s\n"
+				"#endif\n"
+				"D_%s ",
+				name.c_str(), name.c_str(), name.c_str());
+		}
+		if (g_AddStartAddr)
+		{
+			data += StringFormat("__at(0x%X) ", g_StartAddr);
+		}
+		switch (g_Size)
 		{
 		default:
-		case DATA_SIZE_8B:	data += "const unsigned char " + name + "[] = {"; break;
+		case DATA_SIZE_8B:	data += "const unsigned char " +  name + "[] = {"; break;
 		case DATA_SIZE_16B:	data += "const unsigned short " + name + "[] = {"; break;
-		case DATA_SIZE_32B: data += "const unsigned long " + name + "[] = {"; break;
+		case DATA_SIZE_32B: data += "const unsigned long " +  name + "[] = {"; break;
 		};
 		break;
-	case DATA_LANG_ASM:		data += name + ":"; break;
+	case DATA_LANG_ASM:
+		if (g_AddStartAddr)
+		{
+			data += StringFormat(".org 0x%X\n ", g_StartAddr);
+		}
+		data += name + ":";
+		break;
 	};
 }
 
@@ -249,9 +314,7 @@ void AddNewLine(std::string& data)
 //
 void AddByte(std::string& data, u8 value)
 {
-	char strBuf[BUFFER_SIZE];
-	sprintf_s(strBuf, BUFFER_SIZE, GetNumberFormat(), value);
-	data += strBuf;
+	data += StringFormat(GetNumberFormat(), value);
 	switch (g_Lang)
 	{
 	default:
@@ -263,9 +326,7 @@ void AddByte(std::string& data, u8 value)
 //
 void AddWord(std::string& data, u16 value)
 {
-	char strBuf[BUFFER_SIZE];
-	sprintf_s(strBuf, BUFFER_SIZE, GetNumberFormat(), value);
-	data += strBuf;
+	data += StringFormat(GetNumberFormat(), value);
 	switch (g_Lang)
 	{
 	default:
@@ -277,9 +338,7 @@ void AddWord(std::string& data, u16 value)
 //
 void AddDWord(std::string& data, u32 value)
 {
-	char strBuf[BUFFER_SIZE];
-	sprintf_s(strBuf, BUFFER_SIZE, GetNumberFormat(), value);
-	data += strBuf;
+	data += StringFormat(GetNumberFormat(), value);
 	switch (g_Lang)
 	{
 	default:
@@ -289,7 +348,7 @@ void AddDWord(std::string& data, u32 value)
 }
 
 //
-bool Export()
+i32 Export()
 {
 	FILE* file;
 	std::string strData;
@@ -303,7 +362,7 @@ bool Export()
 	if (fopen_s(&file, g_InputFile.c_str(), "rb") != 0)
 	{
 		printf("Error: Fail to open file %s\n", g_InputFile.c_str());
-		return false;
+		return 0;
 	}
 	fseek(file, 0, SEEK_END);
 	u32 fileSize = ftell(file);
@@ -313,7 +372,7 @@ bool Export()
 	{
 		free(binData);
 		printf("Error: Fail to read file %s\n", g_InputFile.c_str());
-		return false;
+		return 0;
 	}
 	fclose(file);
 	// Deco
@@ -323,17 +382,45 @@ bool Export()
 	AddComment(strData, u8"  ▀█▄▀ ██ █ ▄▄█▀ ██ █ ██▄▀ ██ ██ █");
 	AddComment(strData, u8"_____________________________________________________________________________");
 	// License
-	sprintf_s(strBuf, BUFFER_SIZE, "CMSXbin %s by Guillaume \"Aoineko\" Blanchard (2021) under CC BY-SA free license", VERSION);
-	AddComment(strData, strBuf);
+	AddComment(strData, StringFormat("CMSXbin %s by Guillaume \"Aoineko\" Blanchard (2021) under CC BY-SA free license", VERSION));
 	// Date
 	std::time_t result = std::time(nullptr);
 	char* ltime = std::asctime(std::localtime(&result));
 	ltime[strlen(ltime)-1] = 0; // remove final '\n'
-	sprintf_s(strBuf, BUFFER_SIZE, "File generated on %s", ltime);
-	AddComment(strData, strBuf);
+	AddComment(strData, StringFormat("File generated on %s", ltime));
 	// Source
-	sprintf_s(strBuf, BUFFER_SIZE, "Soure file: %s\n", g_InputFile.c_str());
-	AddComment(strData, strBuf);
+	AddComment(strData, StringFormat("Soure file: %s", g_InputFile.c_str()));
+	for (u32 i = 0; i < g_Skip.size(); i++)
+	{
+		if(i == 0)
+			AddComment(strData, StringFormat("Skip areas: from=%i size=%i", g_Skip[i].From, g_Skip[i].Size));
+		else
+			AddComment(strData, StringFormat("          : from=%i size=%i", g_Skip[i].From, g_Skip[i].Size));
+	}
+
+	if (g_PT3)
+	{
+		memcpy(strBuf, binData + 0, 14);
+		strBuf[14] = 0;
+		AddComment(strData, StringFormat("Version:    %s", strBuf));
+
+		memcpy(strBuf, binData + 30, 32);
+		strBuf[32] = 0;
+		AddComment(strData, StringFormat("Module:     %s", strBuf));
+
+		memcpy(strBuf, binData + 66, 32);
+		strBuf[32] = 0;
+		AddComment(strData, StringFormat("Author:     %s", strBuf));
+
+		switch (*(binData + 99))
+		{
+		case 0:		AddComment(strData, "Freq type:  (0) Pro Tracker");	break;
+		case 1:		AddComment(strData, "Freq type:  (1) Sound Tracker");	break;
+		case 2:		AddComment(strData, "Freq type:  (2) ASM/PSC");		break;
+		case 3:		AddComment(strData, "Freq type:  (3) RealSound");		break;
+		default:	AddComment(strData, StringFormat("Freq type:  (%i) Unknow", *(binData + 99)));		break;
+		};
+	}
 
 	StartTable(strData, g_TableName);
 	AddNewLine(strData);
@@ -412,18 +499,17 @@ bool Export()
 	}
 
 	EndTable(strData);
-	sprintf_s(strBuf, BUFFER_SIZE, "Total bytes: %d", total);
-	AddComment(strData, strBuf);
+	AddComment(strData, StringFormat("Total bytes: %d", total));
 
 	// Write header file
 	if (fopen_s(&file, g_OutputFile.c_str(), "wb") != 0)
 	{
 		printf("Error: Fail to create file %s\n", g_OutputFile.c_str());
-		return false;
+		return 0;
 	}
 	fwrite(strData.c_str(), 1, strData.size(), file);
 	fclose(file);
-	return true;
+	return total;
 }
 
 //-----------------------------------------------------------------------------
@@ -448,9 +534,12 @@ void PrintHelp()
 	printf("  -skip F S     Skip binary data from 'F' address to a 'S' size\n");
 	printf("                Value can be hexadecimal (format: 0xFFFF) or decimal\n");
 	printf("                Can be invoked multiple times to skip several sections\n");
-	printf("  -ascii        Display ASCII code of each line (only for 8-bits data)\n");
+	printf("  -ascii        Display ASCII code of each line (only for 8-bits data. default: false)\n");
 	printf("  -ad           Display decimal address offset of the first element of each line\n");
 	printf("  -ax           Display hexadecimal address offset of the first element of each line\n");
+	printf("  -pt3			Extract PT3 header information and add it as comment (default: false)\n");
+	printf("  -at X         Data starting address (can be decimal or hexadecimal starting with '0x')\n");
+	printf("  -def			Add define before data structure (only for C language. default: false)\n");
 	printf("  -h            Display this help\n");
 }
 
@@ -470,7 +559,7 @@ int main(int argc, const char* argv[])
 	{
 		printf("Error: No enough parameters!\n");
 		PrintHelp();
-		return 1;
+		return 0;
 	}
 
 	g_InputFile = argv[1];
@@ -479,53 +568,66 @@ int main(int argc, const char* argv[])
 	for (i32 i = 2; i < argc; ++i)
 	{
 		// Display help
-		if (_stricmp(argv[i], "-h") == 0)
+		if (CMSX::StrEqual(argv[i], "-h"))
 		{
 			PrintHelp();
 			return 0;
 		}
 		// Output filename
-		else if (_stricmp(argv[i], "-o") == 0)
+		else if (CMSX::StrEqual(argv[i], "-o"))
 			g_OutputFile = argv[++i];
 		// Data table name
-		else if (_stricmp(argv[i], "-t") == 0)
+		else if (CMSX::StrEqual(argv[i], "-t"))
 		{
 			g_TableName = ConvertToAlphaNum(argv[++i]);
 			if ((g_TableName[0] >= '0') && (g_TableName[0] <= '9'))
 				g_TableName = "g_" + g_TableName;
 		}
 		// Data size
-		else if (_stricmp(argv[i], "-8b") == 0)
+		else if (CMSX::StrEqual(argv[i], "-8b"))
 			g_Size = DATA_SIZE_8B;
-		else if (_stricmp(argv[i], "-16b") == 0)
+		else if (CMSX::StrEqual(argv[i], "-16b"))
 			g_Size = DATA_SIZE_16B;
-		else if (_stricmp(argv[i], "-32b") == 0)
+		else if (CMSX::StrEqual(argv[i], "-32b"))
 			g_Size = DATA_SIZE_32B;
 		// Data format
-		else if (_stricmp(argv[i], "-dec") == 0)
+		else if (CMSX::StrEqual(argv[i], "-dec"))
 			g_Format = DATA_FORMAT_DEC;
-		else if (_stricmp(argv[i], "-hex") == 0)
+		else if (CMSX::StrEqual(argv[i], "-hex"))
 			g_Format = DATA_FORMAT_HEXA;
-		else if (_stricmp(argv[i], "-bin") == 0)
+		else if (CMSX::StrEqual(argv[i], "-bin"))
 			g_Format = DATA_FORMAT_BIN;
+		// Starting address
+		else if (CMSX::StrEqual(argv[i], "-at"))
+		{
+			g_AddStartAddr = true;
+			i++;
+			sscanf_s(argv[i], "%i", &g_StartAddr);
+		}
 		// Data language
-		else if (_stricmp(argv[i], "-c") == 0)
+		else if (CMSX::StrEqual(argv[i], "-c"))
 			g_Lang = DATA_LANG_C;
-		else if (_stricmp(argv[i], "-asm") == 0)
+		else if (CMSX::StrEqual(argv[i], "-asm"))
 			g_Lang = DATA_LANG_ASM;
 		// Value per line
-		else if (_stricmp(argv[i], "-n") == 0)
+		else if (CMSX::StrEqual(argv[i], "-n"))
 			g_ValuePerLine = atoi(argv[++i]);
 		// Display ASCII
-		else if (_stricmp(argv[i], "-ascii") == 0)
+		else if (CMSX::StrEqual(argv[i], "-ascii"))
 			g_ASCII = true;
+		// Extract PT3 info
+		else if (CMSX::StrEqual(argv[i], "-pt3"))
+			g_PT3 = true;
+		// Add C define 
+		else if (CMSX::StrEqual(argv[i], "-def"))
+			g_Define = true;
 		// Display address
-		else if (_stricmp(argv[i], "-ad") == 0)
+		else if (CMSX::StrEqual(argv[i], "-ad"))
 			g_Address = ADDR_DEC;
-		else if (_stricmp(argv[i], "-ax") == 0)
+		else if (CMSX::StrEqual(argv[i], "-ax"))
 			g_Address = ADDR_HEXA;
 			// Skip area
-		else if (_stricmp(argv[i], "-skip") == 0)
+		else if (CMSX::StrEqual(argv[i], "-skip"))
 		{
 			SkipData s;
 			i++;
@@ -560,5 +662,5 @@ int main(int argc, const char* argv[])
 		g_TableName = "g_" + ConvertToAlphaNum(g_TableName);
 	}
 
-	Export();
+	return g_StartAddr + Export();
 }
